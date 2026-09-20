@@ -262,9 +262,12 @@ fn render_session_page(
             )
             .into_any_element()
     } else {
+        // 外层是 overflow_y_scroll 的容器，可滚动范围取自这个直接子元素的高度，
+        // 高度必须由内容撑开，钉成 100% 就永远滚不动
         div()
             .id(SharedString::from(format!("{}_tree_wrap", id_prefix)))
-            .size_full()
+            .w_full()
+            .flex_none()
             .child(render_session_tree(groups, id_prefix, text_column))
             .into_any_element()
     }

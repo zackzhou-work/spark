@@ -15,12 +15,6 @@ pub fn render_filter_bar(
     on_select_today: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
     on_select_all: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let count_text = if total_count == 1 {
-        "1 session".to_string()
-    } else {
-        format!("{} sessions", total_count)
-    };
-
     let item_w = 48.0;
 
     let thumb: AnyElement = match (prev_filter, current_filter) {
@@ -118,14 +112,23 @@ pub fn render_filter_bar(
                     on_select_all,
                 )),
         )
-        .child(
-            // Subtle count display in English
-            div()
-                .text_size(px(11.0))
-                .font_weight(FontWeight::NORMAL)
-                .text_color(rgb(0x9CA3AF))
-                .child(count_text),
-        )
+        .child(render_count_badge(total_count))
+}
+
+fn render_count_badge(count: usize) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .min_w(px(20.0))
+        .h(px(18.0))
+        .px(px(6.0))
+        .rounded_full()
+        .bg(rgb(0xEDEDED))
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(0x6B7280))
+        .child(count.to_string())
 }
 
 fn render_segment_label(

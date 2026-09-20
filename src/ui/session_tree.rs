@@ -41,7 +41,12 @@ impl SessionTextColumn {
 
 impl Render for SessionTextColumn {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // 缓存视图按根节点单独布局，不写宽度就会被最长标题撑开。
+        // 每一行用 flex_col 而不是 flex_row：taffy 量 flex 行子项时主轴按 MaxContent 测，
+        // 文本拿不到确定宽度就不会截断；列的交叉轴宽度是确定的，truncate 才能生效
         div()
+            .w_full()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .gap(px(GROUP_GAP))
@@ -54,10 +59,10 @@ impl Render for SessionTextColumn {
                         div()
                             .h(px(HEADER_HEIGHT))
                             .flex()
-                            .items_center()
+                            .flex_col()
+                            .justify_center()
                             .pl(px(1.0))
                             .pr(px(6.0))
-                            .overflow_hidden()
                             .child(
                                 div()
                                     .truncate()
@@ -71,10 +76,10 @@ impl Render for SessionTextColumn {
                         div()
                             .h(px(ROW_HEIGHT))
                             .flex()
-                            .items_center()
+                            .flex_col()
+                            .justify_center()
                             .pl(px(1.0))
                             .pr(px(6.0))
-                            .overflow_hidden()
                             .child(
                                 div()
                                     .truncate()
