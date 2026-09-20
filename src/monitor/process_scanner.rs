@@ -35,6 +35,16 @@ pub struct LiveProcess {
     pub cpu_usage: f32,
 }
 
+/// 携带同一个宿主会话 ID 的候选进程：核心进程派生的短命子进程会继承这个环境变量
+#[derive(Debug, Clone, Copy)]
+struct ProcessCandidate {
+    pid: u32,
+    parent: Option<u32>,
+    start_time: u64,
+    has_children: bool,
+    cpu_usage: f32,
+}
+
 pub struct ProcessScanner {
     sys: System,
     sessions_dir: PathBuf,
@@ -73,7 +83,7 @@ impl ProcessScanner {
         self.sys
             .refresh_processes_specifics(ProcessRefreshKind::new().with_cpu());
         let processes = self.sys.processes();
-        let mut live = HashMap::new();
+        let mut candidates = Vec::new();
 
         for (pid, process) in processes {
             if !process.name().eq_ignore_ascii_case("claude") {
@@ -82,18 +92,54 @@ impl ProcessScanner {
             let Some(session_id) = host_session_id(pid.as_u32()) else {
                 continue;
             };
-            let has_children = processes.values().any(|p| p.parent() == Some(*pid));
-            live.insert(
+            candidates.push((
                 session_id,
-                LiveProcess {
+                ProcessCandidate {
                     pid: pid.as_u32(),
-                    has_children,
+                    parent: process.parent().map(|p| p.as_u32()),
+                    start_time: process.start_time(),
+                    has_children: processes.values().any(|p| p.parent() == Some(*pid)),
                     cpu_usage: process.cpu_usage(),
                 },
-            );
+            ));
         }
 
-        live
+        Self::pick_core_processes(candidates)
+    }
+
+    /// 一个会话 ID 可能对应多个进程，只保留核心那个，否则 PID 和忙碌判断会随扫描顺序抖动
+    fn pick_core_processes(candidates: Vec<(String, ProcessCandidate)>) -> HashMap<String, LiveProcess> {
+        let mut grouped: HashMap<String, Vec<ProcessCandidate>> = HashMap::new();
+        for (session_id, candidate) in candidates {
+            grouped.entry(session_id).or_default().push(candidate);
+        }
+
+        grouped
+            .into_iter()
+            .filter_map(|(session_id, group)| {
+                let core = Self::pick_core(&group)?;
+                Some((
+                    session_id,
+                    LiveProcess {
+                        pid: core.pid,
+                        has_children: core.has_children,
+                        cpu_usage: core.cpu_usage,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// 父进程同在组里的都是继承来的子进程，先排掉；剩下的取启动最早的那个
+    fn pick_core(group: &[ProcessCandidate]) -> Option<ProcessCandidate> {
+        let is_inherited =
+            |c: &ProcessCandidate| c.parent.is_some_and(|ppid| group.iter().any(|o| o.pid == ppid));
+        let mut roots = group.iter().filter(|c| !is_inherited(c)).peekable();
+        if roots.peek().is_some() {
+            roots.min_by_key(|c| (c.start_time, c.pid)).copied()
+        } else {
+            group.iter().min_by_key(|c| (c.start_time, c.pid)).copied()
+        }
     }
 
     /// 扫描真实 Claude Desktop 的所有未归档会话
@@ -375,6 +421,67 @@ mod tests {
         let stale = activity(TurnEvent::ToolPending, 120_000);
         let started = hook(HookKind::Busy, 100_000);
         assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&stale), Some(&started), NOW, NOW), TaskState::Running);
+    }
+
+    fn candidate(pid: u32, parent: Option<u32>, start_time: u64) -> ProcessCandidate {
+        ProcessCandidate { pid, parent, start_time, has_children: false, cpu_usage: 0.0 }
+    }
+
+    #[test]
+    fn inherited_children_do_not_replace_the_core_process() {
+        // 91963 是长期存活的核心进程，其余都是它派生的短命子进程
+        let core = ProcessCandidate { has_children: true, cpu_usage: 12.0, ..candidate(91963, Some(600), 100) };
+        let candidates = vec![
+            ("local_a".to_string(), candidate(15742, Some(91963), 900)),
+            ("local_a".to_string(), core),
+            ("local_a".to_string(), candidate(16262, Some(15742), 950)),
+        ];
+
+        let live = ProcessScanner::pick_core_processes(candidates);
+        let picked = live.get("local_a").expect("会话应有存活进程");
+        assert_eq!(picked.pid, 91963);
+        assert!(picked.has_children);
+        assert_eq!(picked.cpu_usage, 12.0);
+    }
+
+    #[test]
+    fn sessions_stay_independent() {
+        let candidates = vec![
+            ("local_a".to_string(), candidate(100, None, 10)),
+            ("local_b".to_string(), candidate(200, None, 20)),
+            ("local_b".to_string(), candidate(201, Some(200), 30)),
+        ];
+
+        let live = ProcessScanner::pick_core_processes(candidates);
+        assert_eq!(live.len(), 2);
+        assert_eq!(live["local_a"].pid, 100);
+        assert_eq!(live["local_b"].pid, 200);
+    }
+
+    #[test]
+    fn oldest_wins_when_the_child_hangs_off_an_intermediate_process() {
+        // 实测：短命进程挂在中间进程下，父进程不在组里，只能靠启动时间区分
+        let candidates = vec![
+            ("local_a".to_string(), candidate(29160, Some(29159), 1_789_892_447)),
+            ("local_a".to_string(), candidate(19140, Some(19139), 1_789_892_121)),
+        ];
+
+        let live = ProcessScanner::pick_core_processes(candidates);
+        assert_eq!(live["local_a"].pid, 19140);
+    }
+
+    #[test]
+    fn pick_is_stable_regardless_of_scan_order() {
+        let mut candidates = vec![
+            ("local_a".to_string(), candidate(15792, Some(91963), 900)),
+            ("local_a".to_string(), candidate(91963, Some(600), 100)),
+            ("local_a".to_string(), candidate(16048, Some(91963), 910)),
+        ];
+        let first = ProcessScanner::pick_core_processes(candidates.clone())["local_a"].pid;
+        candidates.reverse();
+        let second = ProcessScanner::pick_core_processes(candidates)["local_a"].pid;
+        assert_eq!(first, 91963);
+        assert_eq!(second, 91963);
     }
 
     #[test]
