@@ -29,7 +29,11 @@ pub fn render_status_dot(state: TaskState, anim_id: impl Into<gpui::ElementId>) 
                 },
             )
             .into_any_element(),
-        TaskState::Waiting => base.bg(rgb(0xF59E0B)).into_any_element(),
-        TaskState::Completed => base.bg(rgb(0x3B82F6)).into_any_element(),
+        TaskState::Waiting => base.bg(rgb(0xEF4444)).into_any_element(),
+        TaskState::Unread => base.bg(rgb(0xF59E0B)).into_any_element(),
+        TaskState::Completed => base
+            .border_1()
+            .border_color(rgb(0xD1D5DB))
+            .into_any_element(),
     }
 }
