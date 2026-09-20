@@ -1,63 +1,48 @@
 use std::time::Duration;
 use gpui::{
     div, ease_in_out, prelude::*, px, rgb, svg, Animation, AnimationExt as _, AnyElement, ClickEvent,
-    Context, CursorStyle, IntoElement, Render, SharedString, Window,
+    Context, CursorStyle, Entity, IntoElement, Render, SharedString, Window,
 };
 
-use crate::state::{AppState, ProjectGroup, TaskState, TimeFilter};
+use crate::state::{AppState, ProjectGroup, TimeFilter};
 use crate::ui::filter_bar::render_filter_bar;
 use crate::ui::icons::RESIZE_GRIP_PATH;
-use crate::ui::session_tree::render_session_tree;
+use crate::ui::session_tree::{render_session_tree, SessionTextColumn};
 use crate::ui::title_bar::render_title_bar;
-
-/// 呼吸动效周期 2 秒，每 tick 推进的相位
-pub const BREATH_TICK: Duration = Duration::from_millis(100);
-const BREATH_STEP: f32 = 0.05;
 
 pub struct AppWindow {
     pub state: AppState,
-    pub breath_phase: f32,
-}
-
-impl Default for AppWindow {
-    fn default() -> Self {
-        Self {
-            state: AppState::default(),
-            breath_phase: 0.0,
-        }
-    }
+    today_list: Entity<SessionTextColumn>,
+    all_list: Entity<SessionTextColumn>,
 }
 
 impl AppWindow {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_sessions(project_groups: Vec<ProjectGroup>) -> Self {
+    pub fn with_sessions(project_groups: Vec<ProjectGroup>, cx: &mut Context<Self>) -> Self {
+        let state = AppState {
+            is_pinned: true,
+            filter: TimeFilter::Today,
+            prev_filter: None,
+            project_groups,
+        };
+        let today_list = cx.new(|_| SessionTextColumn::new(state.today_groups(), "today"));
+        let all_list = cx.new(|_| SessionTextColumn::new(state.all_groups(), "all"));
         Self {
-            state: AppState {
-                is_pinned: true,
-                filter: TimeFilter::Today,
-                prev_filter: None,
-                project_groups,
-            },
-            breath_phase: 0.0,
+            state,
+            today_list,
+            all_list,
         }
     }
 
-    /// 有 Running 会话时推进相位并返回 true，调用方据此决定是否重绘
-    pub fn advance_breath(&mut self) -> bool {
-        let running = self
-            .state
-            .project_groups
-            .iter()
-            .flat_map(|g| &g.sessions)
-            .any(|s| s.state == TaskState::Running);
-        if running {
-            self.breath_phase = (self.breath_phase + BREATH_STEP) % 1.0;
+    pub fn set_sessions(&mut self, project_groups: Vec<ProjectGroup>, cx: &mut Context<Self>) {
+        if self.state.project_groups == project_groups {
+            return;
         }
-        running
+        self.state.project_groups = project_groups;
+        let today = self.state.today_groups();
+        let all = self.state.all_groups();
+        self.today_list.update(cx, |list, cx| list.set_groups(today, cx));
+        self.all_list.update(cx, |list, cx| list.set_groups(all, cx));
+        cx.notify();
     }
 }
 
@@ -68,7 +53,8 @@ impl Render for AppWindow {
         let prev_filter = self.state.prev_filter;
         let today_groups = self.state.today_groups();
         let all_groups = self.state.all_groups();
-        let breath_phase = self.breath_phase;
+        let today_list = self.today_list.clone();
+        let all_list = self.all_list.clone();
 
         let visible_count: usize = match current_filter {
             TimeFilter::Today => today_groups.iter().map(|g| g.sessions.len()).sum(),
@@ -86,7 +72,7 @@ impl Render for AppWindow {
             .h_full()
             .flex_shrink_0()
             .overflow_y_scroll()
-            .child(render_session_page(&today_groups, TimeFilter::Today, "today", breath_phase));
+            .child(render_session_page(&today_groups, TimeFilter::Today, "today", &today_list));
 
         let page_all = div()
             .id("page_all_container")
@@ -96,7 +82,7 @@ impl Render for AppWindow {
             .h_full()
             .flex_shrink_0()
             .overflow_y_scroll()
-            .child(render_session_page(&all_groups, TimeFilter::All, "all", breath_phase));
+            .child(render_session_page(&all_groups, TimeFilter::All, "all", &all_list));
 
         let sliding_track: AnyElement = match (prev_filter, current_filter) {
             (Some(TimeFilter::Today), TimeFilter::All) => {
@@ -239,7 +225,7 @@ fn render_session_page(
     groups: &[ProjectGroup],
     filter: TimeFilter,
     id_prefix: &'static str,
-    breath_phase: f32,
+    text_column: &Entity<SessionTextColumn>,
 ) -> impl IntoElement {
     if groups.is_empty() {
         let (main_text, sub_text) = match filter {
@@ -279,7 +265,7 @@ fn render_session_page(
         div()
             .id(SharedString::from(format!("{}_tree_wrap", id_prefix)))
             .size_full()
-            .child(render_session_tree(groups, id_prefix, breath_phase))
+            .child(render_session_tree(groups, id_prefix, text_column))
             .into_any_element()
     }
 }

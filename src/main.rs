@@ -60,34 +60,15 @@ fn main() {
                             });
                             subscription.detach();
 
-                            AppWindow::with_sessions(initial_sessions)
+                            AppWindow::with_sessions(initial_sessions, cx)
                         });
-
-                        // 低帧率呼吸动效：有 Running 会话时每 tick 重绘一次
-                        let breath_view = app_view.clone();
-                        window
-                            .spawn(cx, async move |cx| loop {
-                                gpui::Timer::after(ui::BREATH_TICK).await;
-                                let alive = breath_view.update(cx, |view, cx| {
-                                    if view.advance_breath() {
-                                        cx.notify();
-                                    }
-                                });
-                                if alive.is_err() {
-                                    break;
-                                }
-                            })
-                            .detach();
 
                         // 后台线程监听文件变化并扫描，这里只负责把结果刷到 UI
                         let view = app_view.clone();
                         window
                             .spawn(cx, async move |cx| {
                                 while let Some(sessions) = updates.recv().await {
-                                    let updated = view.update(cx, |view, cx| {
-                                        view.state.project_groups = sessions;
-                                        cx.notify();
-                                    });
+                                    let updated = view.update(cx, |view, cx| view.set_sessions(sessions, cx));
                                     if updated.is_err() {
                                         break;
                                     }

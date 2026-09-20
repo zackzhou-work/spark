@@ -1,21 +1,35 @@
-use gpui::{div, prelude::*, px, rgb, AnyElement};
+use std::time::Duration;
+use gpui::{
+    div, ease_in_out, prelude::*, px, rgb, Animation, AnimationExt as _, AnyElement,
+};
 
 use crate::state::TaskState;
 
-/// 呼吸动效相位由外部定时器推进，避免 GPUI 动画每帧重绘
-pub fn render_status_dot(state: TaskState, breath_phase: f32) -> AnyElement {
-    let base = div().w(px(6.0)).h(px(6.0)).rounded_full().flex_none();
+pub fn render_status_dot(state: TaskState, anim_id: impl Into<gpui::ElementId>) -> AnyElement {
+    let base = div()
+        .w(px(6.0))
+        .h(px(6.0))
+        .rounded_full()
+        .flex_none();
 
     match state {
-        TaskState::Running => base.bg(rgb(breath_color(breath_phase))).into_any_element(),
+        TaskState::Running => base
+            .with_animation(
+                anim_id,
+                Animation::new(Duration::from_secs(2))
+                    .repeat()
+                    .with_easing(ease_in_out),
+                |el, delta| {
+                    // 2.0s 周期余弦插值：#D1D5DB (209, 213, 219) ↔ #374151 (55, 65, 81)
+                    let factor = (delta * std::f32::consts::PI * 2.0).cos() * 0.5 + 0.5;
+                    let r = (209.0 * factor + 55.0 * (1.0 - factor)) as u8;
+                    let g = (213.0 * factor + 65.0 * (1.0 - factor)) as u8;
+                    let b = (219.0 * factor + 81.0 * (1.0 - factor)) as u8;
+                    el.bg(rgb((r as u32) << 16 | (g as u32) << 8 | (b as u32)))
+                },
+            )
+            .into_any_element(),
         TaskState::Waiting => base.bg(rgb(0xF59E0B)).into_any_element(),
         TaskState::Completed => base.bg(rgb(0x3B82F6)).into_any_element(),
     }
-}
-
-/// 余弦插值：#D1D5DB (209, 213, 219) ↔ #374151 (55, 65, 81)
-fn breath_color(phase: f32) -> u32 {
-    let factor = (phase * std::f32::consts::PI * 2.0).cos() * 0.5 + 0.5;
-    let mix = |light: f32, dark: f32| (light * factor + dark * (1.0 - factor)) as u32;
-    mix(209.0, 55.0) << 16 | mix(213.0, 65.0) << 8 | mix(219.0, 81.0)
 }

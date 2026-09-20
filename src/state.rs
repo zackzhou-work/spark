@@ -19,7 +19,7 @@ pub enum TaskState {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionItem {
     pub id: String,
     pub title: String,
@@ -30,7 +30,7 @@ pub struct SessionItem {
     pub is_today: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectGroup {
     pub project_name: String,
     pub sessions: Vec<SessionItem>,
