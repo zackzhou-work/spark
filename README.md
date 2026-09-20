@@ -12,20 +12,24 @@
 
 ## 安装 hooks
 
-把下面内容合并进 `~/.claude/settings.json`。脚本只把事件写到 `~/.config/spark/hooks/<session_id>.json`，不影响 Claude Code 的任何决策。
+先把脚本复制到固定位置，再把下面内容合并进 `~/.claude/settings.json`。脚本只把事件写到 `~/.config/spark/hooks/<session_id>.json`，不影响 Claude Code 的任何决策。
+
+```bash
+cp hooks/spark-hook.sh ~/.config/spark/spark-hook.sh && chmod +x ~/.config/spark/spark-hook.sh
+```
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/spark/hooks/spark-hook.sh", "timeout": 5 }] }],
-    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/path/to/spark/hooks/spark-hook.sh", "timeout": 5 }] }],
-    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/path/to/spark/hooks/spark-hook.sh", "timeout": 5 }] }],
-    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "/path/to/spark/hooks/spark-hook.sh", "timeout": 5 }] }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "/path/to/spark/hooks/spark-hook.sh", "timeout": 5 }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/spark/hooks/spark-hook.sh", "timeout": 5 }] }],
-    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "/path/to/spark/hooks/spark-hook.sh", "timeout": 5 }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.config/spark/spark-hook.sh", "timeout": 5 }] }],
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.config/spark/spark-hook.sh", "timeout": 5 }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.config/spark/spark-hook.sh", "timeout": 5 }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.config/spark/spark-hook.sh", "timeout": 5 }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.config/spark/spark-hook.sh", "timeout": 5 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.config/spark/spark-hook.sh", "timeout": 5 }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "/Users/<you>/.config/spark/spark-hook.sh", "timeout": 5 }] }]
   }
 }
 ```
 
-路径按实际 clone 位置替换。
+把 `<you>` 换成你的用户名。
