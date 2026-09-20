@@ -4,9 +4,21 @@
 
 ## 状态来源
 
-- **进程**：每个 claude 核心进程的环境变量 `CLAUDE_CODE_HOST_SESSION_ID` 对应桌面端的会话 ID，没有进程即 Completed。
-- **transcript**：读 `~/.claude/projects/<cwd>/<cliSessionId>.jsonl` 末尾。end_turn 或用户打断为 Completed；工具调用挂起为 Running；AskUserQuestion / ExitPlanMode 为 Waiting。
+- **进程**：每个 claude 核心进程的环境变量 `CLAUDE_CODE_HOST_SESSION_ID` 对应桌面端的会话 ID，没有进程就是回合已结束。
+- **transcript**：读 `~/.claude/projects/<cwd>/<cliSessionId>.jsonl` 末尾。end_turn 或用户打断为回合结束；工具调用挂起为 Running；AskUserQuestion / ExitPlanMode 为 Waiting。
 - **hooks（可选）**：装上后"等待授权"由 Claude Code 直接报告，否则只能靠"工具挂起 45 秒无动静"推测。
+- **会话 JSON 的 `lastFocusedAt`**：回合结束后，`lastActivityAt` 比它新就是产出还没在桌面端看过，算 Unread。
+
+四种状态和桌面端侧栏那颗点一一对应：
+
+| spark | 桌面端侧栏 | 含义 |
+| --- | --- | --- |
+| 灰色呼吸 | 实心深点 | 回合进行中 |
+| 红点 | （仍是实心深点） | 卡在授权框或模型的提问上 |
+| 黄点 | 黄点 | 回合结束，产出还没看过 |
+| 空心灰圈 | 空心圈 | 回合结束且已经看过 |
+
+侧栏对"等授权"不单独标色，这一档是 spark 多出来的信息，所以给了红色而不是黄色。
 
 扫描由文件监听驱动（会话目录、transcript 目录、hooks 目录），另有 5 秒定时兜底处理进程退出等无文件事件的变化。
 

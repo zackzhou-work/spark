@@ -13,9 +13,11 @@ pub enum TimeFilter {
 pub enum TaskState {
     /// 任务进行中：灰度呼吸动效 (#D1D5DB ↔ #374151, 2.0s 周期)
     Running,
-    /// 等待开发者确认/授权：实心金黄色 (#F59E0B)
+    /// 卡在授权框或模型的提问上，你不动它就不会往下走：实心红色 (#EF4444)
     Waiting,
-    /// 任务已完成：实心深蓝色 (#3B82F6)
+    /// 回合已结束，但产出还没在桌面端看过：实心金黄色 (#F59E0B)
+    Unread,
+    /// 回合已结束且已经看过：空心灰圈 (#D1D5DB)
     Completed,
 }
 
@@ -76,7 +78,7 @@ impl AppState {
                     SessionItem {
                         id: "s2".to_string(),
                         title: "Fix SQLite Read/Write Deadlock".to_string(),
-                        state: TaskState::Completed,
+                        state: TaskState::Unread,
                         pid: Some(1025),
                         working_dir: "/Users/zhouzhou74/Desktop/work/openpaper".to_string(),
                         is_today: false,
@@ -140,7 +142,7 @@ impl AppState {
         self.project_groups
             .iter()
             .flat_map(|g| &g.sessions)
-            .filter(|s| s.state != TaskState::Completed)
+            .filter(|s| matches!(s.state, TaskState::Running | TaskState::Waiting))
             .count()
     }
 }
