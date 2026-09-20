@@ -5011,6 +5011,7 @@ dependencies = [
  "chrono",
  "cocoa 0.26.0",
  "gpui",
+ "libc",
  "objc",
  "raw-window-handle",
  "serde",

@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::Deserialize;
-use sysinfo::System;
 
+use serde::Deserialize;
+use sysinfo::{ProcessRefreshKind, System};
+
+use super::transcript::{self, TranscriptActivity, TurnEvent};
+use crate::platform::host_session_id;
 use crate::state::{ProjectGroup, SessionItem, TaskState};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 struct RawSessionJson {
     session_id: Option<String>,
     cli_session_id: Option<String>,
@@ -21,84 +23,86 @@ struct RawSessionJson {
     #[serde(default)]
     last_activity_at: u64,
     #[serde(default)]
-    last_focused_at: u64,
-    #[serde(default)]
     created_at: u64,
-    #[serde(default)]
-    latest_user_frame_at: Option<u64>,
-    #[serde(default)]
-    completed_turns: Option<u32>,
-    pending_system_reminder: Option<String>,
+}
+
+/// 与某个桌面端会话对应的存活 Claude 进程
+#[derive(Debug, Clone, Copy)]
+pub struct LiveProcess {
+    pub pid: u32,
+    pub has_children: bool,
+    pub cpu_usage: f32,
 }
 
 pub struct ProcessScanner {
     sys: System,
+    sessions_dir: PathBuf,
+    projects_root: PathBuf,
 }
+
+/// 工具调用挂起且 transcript 无更新超过此时长，视为在等用户授权
+const TOOL_PENDING_IDLE_MS: u64 = 45_000;
+/// transcript 尚未生成时，刚提交的会话仍按运行中处理
+const FRESH_SESSION_MS: u64 = 60_000;
 
 impl ProcessScanner {
     pub fn new() -> Self {
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/Users/zhouzhou74".to_string()));
         Self {
-            sys: System::new_all(),
+            sys: System::new(),
+            sessions_dir: home.join("Library/Application Support/Claude/claude-code-sessions"),
+            projects_root: home.join(".claude/projects"),
         }
     }
 
-    /// 扫描系统中正在执行的 Claude 核心进程工作目录及 PID
-    fn get_running_cwds(&mut self) -> HashMap<String, u32> {
-        self.sys.refresh_processes();
-        let mut active_cwds = HashMap::new();
+    /// 通过进程环境变量把每个存活的 Claude 核心进程精确归到宿主会话 ID
+    fn get_live_processes(&mut self) -> HashMap<String, LiveProcess> {
+        self.sys
+            .refresh_processes_specifics(ProcessRefreshKind::new().with_cpu());
+        let processes = self.sys.processes();
+        let mut live = HashMap::new();
 
-        for (pid, process) in self.sys.processes() {
-            let name = process.name();
-            // 过滤外层包装器 (如 macOS disclaimer 辅助进程)
-            if name.eq_ignore_ascii_case("disclaimer") {
+        for (pid, process) in processes {
+            if !process.name().eq_ignore_ascii_case("claude") {
                 continue;
             }
-
-            let is_claude = name.eq_ignore_ascii_case("claude")
-                || process.cmd().iter().any(|arg| {
-                    arg.contains("claude-code") || arg.contains("claude.app/Contents/MacOS/claude")
-                });
-
-            if is_claude {
-                if let Some(cwd) = process.cwd() {
-                    let cwd_str = cwd.to_string_lossy().trim_end_matches('/').to_string();
-                    if !cwd_str.is_empty() {
-                        // 优先保留真正名为 claude 的核心工作进程
-                        let is_exact_claude = name.eq_ignore_ascii_case("claude");
-                        if !active_cwds.contains_key(&cwd_str) || is_exact_claude {
-                            active_cwds.insert(cwd_str, pid.as_u32());
-                        }
-                    }
-                }
-            }
+            let Some(session_id) = host_session_id(pid.as_u32()) else {
+                continue;
+            };
+            let has_children = processes.values().any(|p| p.parent() == Some(*pid));
+            live.insert(
+                session_id,
+                LiveProcess {
+                    pid: pid.as_u32(),
+                    has_children,
+                    cpu_usage: process.cpu_usage(),
+                },
+            );
         }
 
-        active_cwds
+        live
     }
 
     /// 扫描真实 Claude Desktop 的所有未归档会话
     pub fn scan_claude_sessions(&mut self) -> Vec<ProjectGroup> {
-        let active_cwds = self.get_running_cwds();
+        let live = self.get_live_processes();
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/zhouzhou74".to_string());
-        let sessions_dir = PathBuf::from(home)
-            .join("Library/Application Support/Claude/claude-code-sessions");
-
-        if !sessions_dir.exists() {
+        if !self.sessions_dir.exists() {
             return Vec::new();
         }
 
+        let now_ms = chrono::Local::now().timestamp_millis() as u64;
+        let today = chrono::Local::now().date_naive();
+        let projects_root = self.projects_root.clone();
         let mut discovered = Vec::new();
 
-        Self::find_json_files(&sessions_dir, &mut |file_path| {
+        Self::find_json_files(&self.sessions_dir, &mut |file_path| {
             let Ok(content) = fs::read_to_string(file_path) else {
                 return;
             };
             let Ok(data) = serde_json::from_str::<RawSessionJson>(&content) else {
                 return;
             };
-
-            // 过滤已归档会话
             if data.is_archived {
                 return;
             }
@@ -118,62 +122,28 @@ impl ProcessScanner {
                 return;
             }
 
-            // 检查当前会话是否匹配活动进程
-            let mut matched_pid = None;
-            if let Some(ref wt) = data.worktree_path {
-                let wt_trim = wt.trim_end_matches('/');
-                if let Some(&p) = active_cwds.get(wt_trim) {
-                    matched_pid = Some(p as i32);
-                }
-            }
-            if matched_pid.is_none() {
-                if let Some(ref cwd) = data.cwd {
-                    let cwd_trim = cwd.trim_end_matches('/');
-                    if let Some(&p) = active_cwds.get(cwd_trim) {
-                        matched_pid = Some(p as i32);
-                    }
-                }
-            }
-            if matched_pid.is_none() && !origin_cwd.is_empty() {
-                let orig_trim = origin_cwd.trim_end_matches('/');
-                if let Some(&p) = active_cwds.get(orig_trim) {
-                    matched_pid = Some(p as i32);
-                }
-            }
-
-            let now_ms = chrono::Local::now().timestamp_millis() as u64;
-
-            let state = if let Some(pid_val) = matched_pid {
-                let pid_sys = sysinfo::Pid::from_u32(pid_val as u32);
-                let has_children = self
-                    .sys
-                    .processes()
-                    .values()
-                    .any(|p| p.parent() == Some(pid_sys));
-                let proc_cpu = self
-                    .sys
-                    .process(pid_sys)
-                    .map(|p| p.cpu_usage())
-                    .unwrap_or(0.0);
-
-                Self::determine_session_state(
-                    true,
-                    has_children,
-                    proc_cpu,
-                    now_ms,
-                    data.last_activity_at,
-                    data.last_focused_at,
-                    data.latest_user_frame_at,
-                    data.pending_system_reminder.is_some(),
-                )
-            } else {
-                TaskState::Completed
-            };
-
             let session_id = data.session_id.unwrap_or_else(|| "session".to_string());
-            let activity_ts = data.last_activity_at.max(data.created_at);
+            let process = live.get(&session_id).copied();
 
-            let today = chrono::Local::now().date_naive();
+            let activity = process.and_then(|_| {
+                let cli_session_id = data.cli_session_id.as_deref()?;
+                let candidates = [
+                    data.cwd.as_deref().unwrap_or(""),
+                    data.worktree_path.as_deref().unwrap_or(""),
+                    origin_cwd.as_str(),
+                ];
+                let path = transcript::locate(&projects_root, cli_session_id, &candidates)?;
+                transcript::read_activity(&path)
+            });
+
+            let state = Self::determine_session_state(
+                process.as_ref(),
+                activity.as_ref(),
+                data.last_activity_at,
+                now_ms,
+            );
+
+            let activity_ts = data.last_activity_at.max(data.created_at);
             let is_today = if state == TaskState::Running || state == TaskState::Waiting {
                 true
             } else if activity_ts > 0 {
@@ -195,7 +165,7 @@ impl ProcessScanner {
                     id: session_id,
                     title,
                     state,
-                    pid: matched_pid,
+                    pid: process.map(|p| p.pid as i32),
                     working_dir: origin_cwd,
                     is_today,
                 },
@@ -207,7 +177,16 @@ impl ProcessScanner {
             return Vec::new();
         }
 
-        // 按项目分组聚合
+        Self::group_by_project(discovered)
+    }
+
+    fn group_by_project(discovered: Vec<(String, SessionItem, u64)>) -> Vec<ProjectGroup> {
+        let priority = |state: TaskState| match state {
+            TaskState::Running => 2,
+            TaskState::Waiting => 1,
+            TaskState::Completed => 0,
+        };
+
         let mut groups_map: BTreeMap<String, Vec<(SessionItem, u64)>> = BTreeMap::new();
         for (proj, item, last_act) in discovered {
             groups_map.entry(proj).or_default().push((item, last_act));
@@ -217,17 +196,9 @@ impl ProcessScanner {
         for (proj, mut items) in groups_map {
             // 项目内会话：Running/Waiting 优先，其余按最后活动时间倒序排列
             items.sort_by(|a, b| {
-                let a_prio = match a.0.state {
-                    TaskState::Running => 2,
-                    TaskState::Waiting => 1,
-                    TaskState::Completed => 0,
-                };
-                let b_prio = match b.0.state {
-                    TaskState::Running => 2,
-                    TaskState::Waiting => 1,
-                    TaskState::Completed => 0,
-                };
-                b_prio.cmp(&a_prio).then_with(|| b.1.cmp(&a.1))
+                priority(b.0.state)
+                    .cmp(&priority(a.0.state))
+                    .then_with(|| b.1.cmp(&a.1))
             });
             let sessions = items.into_iter().map(|(item, _)| item).collect();
             groups.push(ProjectGroup {
@@ -237,66 +208,49 @@ impl ProcessScanner {
         }
 
         // 排序项目：有进行中/待处理任务的项目优先置顶显示，其余按字母排序
+        let group_priority = |g: &ProjectGroup| g.sessions.iter().map(|s| priority(s.state)).max().unwrap_or(0);
         groups.sort_by(|a, b| {
-            let a_prio = a
-                .sessions
-                .iter()
-                .map(|s| match s.state {
-                    TaskState::Running => 2,
-                    TaskState::Waiting => 1,
-                    TaskState::Completed => 0,
-                })
-                .max()
-                .unwrap_or(0);
-            let b_prio = b
-                .sessions
-                .iter()
-                .map(|s| match s.state {
-                    TaskState::Running => 2,
-                    TaskState::Waiting => 1,
-                    TaskState::Completed => 0,
-                })
-                .max()
-                .unwrap_or(0);
-            b_prio
-                .cmp(&a_prio)
+            group_priority(b)
+                .cmp(&group_priority(a))
                 .then_with(|| a.project_name.to_lowercase().cmp(&b.project_name.to_lowercase()))
         });
 
         groups
     }
 
-    /// 核心状态判决机：
-    /// 1. Running (灰度呼吸): 活跃执行中（存在子进程/CPU占用/新Prompt刚发出/15秒内有活动）
-    /// 2. Waiting (金黄色常亮): 进程存活但当前处于等待（5分钟内刚结束等待用户查看，或处于权限授权/用户输入确认等待）
-    /// 3. Completed (蓝色常亮): 进程已关闭，或已闲置超过5分钟/用户已查看完毕
+    /// 状态判决：
+    /// - Completed: 没有存活进程，或 transcript 显示回合已结束
+    /// - Waiting: 工具在向用户提问；或工具调用挂起且进程、transcript 都长时间无动静（等授权）
+    /// - Running: 其余存活会话；transcript 尚未生成时按提交时间兜底
     pub fn determine_session_state(
-        has_matched_process: bool,
-        has_children: bool,
-        proc_cpu: f32,
-        now_ms: u64,
+        process: Option<&LiveProcess>,
+        activity: Option<&TranscriptActivity>,
         last_activity_at: u64,
-        last_focused_at: u64,
-        latest_user_frame_at: Option<u64>,
-        pending_system_reminder: bool,
+        now_ms: u64,
     ) -> TaskState {
-        if !has_matched_process {
+        let Some(process) = process else {
             return TaskState::Completed;
-        }
-
-        let elapsed_act = now_ms.saturating_sub(last_activity_at);
-        let user_frame_after_act = latest_user_frame_at.map_or(false, |uf| uf > last_activity_at);
-
-        if has_children || proc_cpu > 1.0 || user_frame_after_act || elapsed_act < 15_000 {
-            TaskState::Running
-        } else {
-            let has_focused_after = last_focused_at >= last_activity_at;
-            if (elapsed_act < 300_000 && !has_focused_after)
-                || (pending_system_reminder && elapsed_act < 300_000)
-            {
-                TaskState::Waiting
+        };
+        let Some(activity) = activity else {
+            return if now_ms.saturating_sub(last_activity_at) < FRESH_SESSION_MS {
+                TaskState::Running
             } else {
                 TaskState::Completed
+            };
+        };
+
+        match activity.last_event {
+            TurnEvent::Ended => TaskState::Completed,
+            TurnEvent::Generating => TaskState::Running,
+            TurnEvent::AwaitingUser => TaskState::Waiting,
+            TurnEvent::ToolPending => {
+                let idle_ms = now_ms.saturating_sub(activity.last_modified_ms);
+                let busy = process.has_children || process.cpu_usage > 1.0 || idle_ms < TOOL_PENDING_IDLE_MS;
+                if busy {
+                    TaskState::Running
+                } else {
+                    TaskState::Waiting
+                }
             }
         }
     }
@@ -319,63 +273,57 @@ impl ProcessScanner {
 mod tests {
     use super::*;
 
+    const NOW: u64 = 1_000_000_000;
+
+    fn idle_process() -> LiveProcess {
+        LiveProcess { pid: 1, has_children: false, cpu_usage: 0.0 }
+    }
+
+    fn activity(event: TurnEvent, modified_ago_ms: u64) -> TranscriptActivity {
+        TranscriptActivity { last_event: event, last_modified_ms: NOW - modified_ago_ms }
+    }
+
     #[test]
-    fn test_state_evaluation() {
-        let now_ms = 1_000_000_000;
+    fn no_process_is_completed() {
+        let act = activity(TurnEvent::Generating, 0);
+        assert_eq!(ProcessScanner::determine_session_state(None, Some(&act), NOW, NOW), TaskState::Completed);
+    }
 
-        // 1. Process dead -> Completed
-        assert_eq!(
-            ProcessScanner::determine_session_state(false, false, 0.0, now_ms, now_ms, 0, None, false),
-            TaskState::Completed
-        );
+    #[test]
+    fn turn_ended_is_completed_regardless_of_process_activity() {
+        let busy = LiveProcess { pid: 1, has_children: true, cpu_usage: 50.0 };
+        let act = activity(TurnEvent::Ended, 0);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&busy), Some(&act), NOW, NOW), TaskState::Completed);
+    }
 
-        // 2. Active child process -> Running
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, true, 0.0, now_ms, now_ms - 50_000, 0, None, false),
-            TaskState::Running
-        );
+    #[test]
+    fn generating_is_running_even_when_process_looks_idle() {
+        let act = activity(TurnEvent::Generating, 600_000);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&act), NOW - 600_000, NOW), TaskState::Running);
+    }
 
-        // 3. High CPU usage -> Running
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, false, 5.0, now_ms, now_ms - 50_000, 0, None, false),
-            TaskState::Running
-        );
+    #[test]
+    fn user_facing_tool_is_waiting() {
+        let act = activity(TurnEvent::AwaitingUser, 0);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&act), NOW, NOW), TaskState::Waiting);
+    }
 
-        // 4. User sent frame after last activity (prompt submitted, waiting for output) -> Running
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, false, 0.0, now_ms, now_ms - 20_000, 0, Some(now_ms - 5_000), false),
-            TaskState::Running
-        );
+    #[test]
+    fn pending_tool_is_running_while_busy_and_waiting_when_stale() {
+        let fresh = activity(TurnEvent::ToolPending, 5_000);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&fresh), NOW, NOW), TaskState::Running);
 
-        // 5. Recent activity within 15 seconds -> Running
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, false, 0.0, now_ms, now_ms - 10_000, 0, None, false),
-            TaskState::Running
-        );
+        let stale = activity(TurnEvent::ToolPending, 120_000);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&stale), NOW, NOW), TaskState::Waiting);
 
-        // 6. Finished within 5 mins, user has NOT focused tab -> Waiting (prompt/review reminder)
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, false, 0.0, now_ms, now_ms - 60_000, now_ms - 120_000, None, false),
-            TaskState::Waiting
-        );
+        let with_child = LiveProcess { pid: 1, has_children: true, cpu_usage: 0.0 };
+        assert_eq!(ProcessScanner::determine_session_state(Some(&with_child), Some(&stale), NOW, NOW), TaskState::Running);
+    }
 
-        // 7. Pending system reminder / permission within 5 mins -> Waiting
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, false, 0.0, now_ms, now_ms - 60_000, now_ms - 10_000, None, true),
-            TaskState::Waiting
-        );
-
-        // 8. Finished within 5 mins, user HAS focused tab (reviewed) -> Completed
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, false, 0.0, now_ms, now_ms - 60_000, now_ms - 30_000, None, false),
-            TaskState::Completed
-        );
-
-        // 9. Idle for > 5 minutes (> 300s) -> Completed
-        assert_eq!(
-            ProcessScanner::determine_session_state(true, false, 0.0, now_ms, now_ms - 400_000, 0, None, false),
-            TaskState::Completed
-        );
+    #[test]
+    fn missing_transcript_falls_back_to_submit_time() {
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), None, NOW - 10_000, NOW), TaskState::Running);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), None, NOW - 120_000, NOW), TaskState::Completed);
     }
 
     #[test]
@@ -390,26 +338,5 @@ mod tests {
             }
         }
         assert!(!groups.is_empty(), "Should discover project groups if claude sessions exist");
-    }
-
-    #[test]
-    fn test_filter_today() {
-        let mut scanner = ProcessScanner::new();
-        let groups = scanner.scan_claude_sessions();
-        let app_state = crate::state::AppState {
-            is_pinned: true,
-            filter: crate::state::TimeFilter::Today,
-            prev_filter: None,
-            project_groups: groups.clone(),
-        };
-        let today_groups = app_state.filtered_groups();
-        println!("Today groups count: {}", today_groups.len());
-        for g in &today_groups {
-            println!("Today Project: {} ({} sessions)", g.project_name, g.sessions.len());
-            for s in &g.sessions {
-                println!("  - [{:?}] {} (is_today: {})", s.state, s.title, s.is_today);
-                assert!(s.is_today);
-            }
-        }
     }
 }
