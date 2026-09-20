@@ -45,6 +45,7 @@ fn main() {
                         // 启动时立即扫描加载会话
                         let mut scanner = crate::monitor::ProcessScanner::new();
                         let initial_sessions = scanner.scan_claude_sessions();
+                        let mut updates = crate::monitor::watcher::spawn(scanner);
                         let app_view = cx.new(|cx| {
                             let subscription = cx.observe_window_bounds(window, |_this, window, _cx| {
                                 hide_native_traffic_lights(window);
@@ -62,17 +63,18 @@ fn main() {
                             AppWindow::with_sessions(initial_sessions)
                         });
 
-                        // 后台定时扫描并动态同步 Claude 会话状态
+                        // 后台线程监听文件变化并扫描，这里只负责把结果刷到 UI
                         let view = app_view.clone();
                         window
                             .spawn(cx, async move |cx| {
-                                loop {
-                                    gpui::Timer::after(std::time::Duration::from_secs(2)).await;
-                                    let sessions = scanner.scan_claude_sessions();
-                                    let _ = view.update(cx, |view, cx| {
+                                while let Some(sessions) = updates.recv().await {
+                                    let updated = view.update(cx, |view, cx| {
                                         view.state.project_groups = sessions;
                                         cx.notify();
                                     });
+                                    if updated.is_err() {
+                                        break;
+                                    }
                                 }
                             })
                             .detach();

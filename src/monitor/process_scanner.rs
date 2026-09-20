@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sysinfo::{ProcessRefreshKind, System};
 
+use super::hooks::{self, HookKind, HookSignal};
 use super::transcript::{self, TranscriptActivity, TurnEvent};
 use crate::platform::host_session_id;
 use crate::state::{ProjectGroup, SessionItem, TaskState};
@@ -38,6 +39,7 @@ pub struct ProcessScanner {
     sys: System,
     sessions_dir: PathBuf,
     projects_root: PathBuf,
+    hooks_dir: PathBuf,
 }
 
 /// 工具调用挂起且 transcript 无更新超过此时长，视为在等用户授权
@@ -52,7 +54,18 @@ impl ProcessScanner {
             sys: System::new(),
             sessions_dir: home.join("Library/Application Support/Claude/claude-code-sessions"),
             projects_root: home.join(".claude/projects"),
+            hooks_dir: hooks::hooks_dir(&home),
         }
+    }
+
+    /// 需要监听变化的目录；hooks 目录先建好，否则无法被监听
+    pub fn watch_dirs(&self) -> Vec<PathBuf> {
+        let _ = fs::create_dir_all(&self.hooks_dir);
+        vec![
+            self.sessions_dir.clone(),
+            self.projects_root.clone(),
+            self.hooks_dir.clone(),
+        ]
     }
 
     /// 通过进程环境变量把每个存活的 Claude 核心进程精确归到宿主会话 ID
@@ -94,6 +107,7 @@ impl ProcessScanner {
         let now_ms = chrono::Local::now().timestamp_millis() as u64;
         let today = chrono::Local::now().date_naive();
         let projects_root = self.projects_root.clone();
+        let hooks_dir = self.hooks_dir.clone();
         let mut discovered = Vec::new();
 
         Self::find_json_files(&self.sessions_dir, &mut |file_path| {
@@ -125,8 +139,9 @@ impl ProcessScanner {
             let session_id = data.session_id.unwrap_or_else(|| "session".to_string());
             let process = live.get(&session_id).copied();
 
-            let activity = process.and_then(|_| {
-                let cli_session_id = data.cli_session_id.as_deref()?;
+            let cli_session_id = process.and(data.cli_session_id.as_deref());
+            let hook = cli_session_id.and_then(|id| hooks::read_signal(&hooks_dir, id));
+            let activity = cli_session_id.and_then(|cli_session_id| {
                 let candidates = [
                     data.cwd.as_deref().unwrap_or(""),
                     data.worktree_path.as_deref().unwrap_or(""),
@@ -139,6 +154,7 @@ impl ProcessScanner {
             let state = Self::determine_session_state(
                 process.as_ref(),
                 activity.as_ref(),
+                hook.as_ref(),
                 data.last_activity_at,
                 now_ms,
             );
@@ -220,17 +236,25 @@ impl ProcessScanner {
 
     /// 状态判决：
     /// - Completed: 没有存活进程，或 transcript 显示回合已结束
-    /// - Waiting: 工具在向用户提问；或工具调用挂起且进程、transcript 都长时间无动静（等授权）
+    /// - Waiting: hook 报告正在等授权且 transcript 之后没有新动静；工具在向用户提问；
+    ///   没装 hook 时，工具调用挂起且进程、transcript 都长时间无动静也视为等授权
     /// - Running: 其余存活会话；transcript 尚未生成时按提交时间兜底
     pub fn determine_session_state(
         process: Option<&LiveProcess>,
         activity: Option<&TranscriptActivity>,
+        hook: Option<&HookSignal>,
         last_activity_at: u64,
         now_ms: u64,
     ) -> TaskState {
         let Some(process) = process else {
             return TaskState::Completed;
         };
+        let transcript_modified_ms = activity.map_or(0, |a| a.last_modified_ms);
+        if let Some(hook) = hook {
+            if hook.kind == HookKind::PermissionPrompt && hook.at_ms >= transcript_modified_ms {
+                return TaskState::Waiting;
+            }
+        }
         let Some(activity) = activity else {
             return if now_ms.saturating_sub(last_activity_at) < FRESH_SESSION_MS {
                 TaskState::Running
@@ -243,6 +267,8 @@ impl ProcessScanner {
             TurnEvent::Ended => TaskState::Completed,
             TurnEvent::Generating => TaskState::Running,
             TurnEvent::AwaitingUser => TaskState::Waiting,
+            // 装了 hook 的会话，等授权会由 hook 明确报告，不再靠超时猜
+            TurnEvent::ToolPending if hook.is_some() => TaskState::Running,
             TurnEvent::ToolPending => {
                 let idle_ms = now_ms.saturating_sub(activity.last_modified_ms);
                 let busy = process.has_children || process.cpu_usage > 1.0 || idle_ms < TOOL_PENDING_IDLE_MS;
@@ -286,44 +312,69 @@ mod tests {
     #[test]
     fn no_process_is_completed() {
         let act = activity(TurnEvent::Generating, 0);
-        assert_eq!(ProcessScanner::determine_session_state(None, Some(&act), NOW, NOW), TaskState::Completed);
+        assert_eq!(ProcessScanner::determine_session_state(None, Some(&act), None, NOW, NOW), TaskState::Completed);
     }
 
     #[test]
     fn turn_ended_is_completed_regardless_of_process_activity() {
         let busy = LiveProcess { pid: 1, has_children: true, cpu_usage: 50.0 };
         let act = activity(TurnEvent::Ended, 0);
-        assert_eq!(ProcessScanner::determine_session_state(Some(&busy), Some(&act), NOW, NOW), TaskState::Completed);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&busy), Some(&act), None, NOW, NOW), TaskState::Completed);
     }
 
     #[test]
     fn generating_is_running_even_when_process_looks_idle() {
         let act = activity(TurnEvent::Generating, 600_000);
-        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&act), NOW - 600_000, NOW), TaskState::Running);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&act), None, NOW - 600_000, NOW), TaskState::Running);
     }
 
     #[test]
     fn user_facing_tool_is_waiting() {
         let act = activity(TurnEvent::AwaitingUser, 0);
-        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&act), NOW, NOW), TaskState::Waiting);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&act), None, NOW, NOW), TaskState::Waiting);
     }
 
     #[test]
     fn pending_tool_is_running_while_busy_and_waiting_when_stale() {
         let fresh = activity(TurnEvent::ToolPending, 5_000);
-        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&fresh), NOW, NOW), TaskState::Running);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&fresh), None, NOW, NOW), TaskState::Running);
 
         let stale = activity(TurnEvent::ToolPending, 120_000);
-        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&stale), NOW, NOW), TaskState::Waiting);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&stale), None, NOW, NOW), TaskState::Waiting);
 
         let with_child = LiveProcess { pid: 1, has_children: true, cpu_usage: 0.0 };
-        assert_eq!(ProcessScanner::determine_session_state(Some(&with_child), Some(&stale), NOW, NOW), TaskState::Running);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&with_child), Some(&stale), None, NOW, NOW), TaskState::Running);
     }
 
     #[test]
     fn missing_transcript_falls_back_to_submit_time() {
-        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), None, NOW - 10_000, NOW), TaskState::Running);
-        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), None, NOW - 120_000, NOW), TaskState::Completed);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), None, None, NOW - 10_000, NOW), TaskState::Running);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), None, None, NOW - 120_000, NOW), TaskState::Completed);
+    }
+
+    fn hook(kind: HookKind, at_ago_ms: u64) -> HookSignal {
+        HookSignal { kind, at_ms: NOW - at_ago_ms }
+    }
+
+    #[test]
+    fn hook_permission_prompt_wins_until_transcript_moves_on() {
+        let pending = activity(TurnEvent::ToolPending, 10_000);
+        let asked = hook(HookKind::PermissionPrompt, 5_000);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&pending), Some(&asked), NOW, NOW), TaskState::Waiting);
+
+        // 用户授权后工具结果写入 transcript，比 hook 事件更新
+        let resumed = activity(TurnEvent::Generating, 1_000);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&resumed), Some(&asked), NOW, NOW), TaskState::Running);
+
+        // 没有进程时 hook 不起作用
+        assert_eq!(ProcessScanner::determine_session_state(None, Some(&pending), Some(&asked), NOW, NOW), TaskState::Completed);
+    }
+
+    #[test]
+    fn hooked_session_does_not_guess_waiting_from_idle_tool() {
+        let stale = activity(TurnEvent::ToolPending, 120_000);
+        let started = hook(HookKind::Busy, 100_000);
+        assert_eq!(ProcessScanner::determine_session_state(Some(&idle_process()), Some(&stale), Some(&started), NOW, NOW), TaskState::Running);
     }
 
     #[test]
