@@ -278,8 +278,9 @@ impl ProcessScanner {
             TurnEvent::Ended => finished,
             TurnEvent::Generating => TaskState::Running,
             TurnEvent::AwaitingUser => TaskState::Waiting,
-            // 装了 hook 的会话，等授权会由 hook 明确报告，不再靠超时猜
-            TurnEvent::ToolPending if hook.is_some() => TaskState::Running,
+            // hook 还在报工具执行就不用超时去猜；报别的（比如等了一分钟的 idle 通知）
+            // 说明它已经盖掉了更早的授权事件，这时候仍然要靠超时兜底
+            TurnEvent::ToolPending if hook.map(|h| h.kind) == Some(HookKind::Busy) => TaskState::Running,
             TurnEvent::ToolPending => {
                 let idle_ms = now_ms.saturating_sub(activity.last_modified_ms);
                 let busy = process.has_children || process.cpu_usage > 1.0 || idle_ms < TOOL_PENDING_IDLE_MS;
@@ -420,6 +421,17 @@ mod tests {
         let data: RawSessionJson = serde_json::from_str(raw).unwrap();
         assert_eq!(data.last_activity_at, 2);
         assert_eq!(data.last_focused_at, 1);
+    }
+
+    #[test]
+    fn idle_notification_does_not_mask_a_permission_wait() {
+        // hook 文件一个会话只留最后一条事件，等授权时来的 idle 通知会把 PermissionRequest 盖掉
+        let stale = activity(TurnEvent::ToolPending, 120_000);
+        let idle_notice = hook(HookKind::Other, 5_000);
+        assert_eq!(
+            ProcessScanner::determine_session_state(Some(&idle_process()), Some(&stale), Some(&idle_notice), NOW, NOW, NOW),
+            TaskState::Waiting
+        );
     }
 
     #[test]
