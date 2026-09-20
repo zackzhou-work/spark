@@ -6,11 +6,11 @@ mod ui;
 
 use config::WindowConfig;
 use gpui::{
-    actions, point, px, size, App, AppContext, Application, Bounds, KeyBinding, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions,
+    actions, point, px, size, App, AppContext, Application, Bounds, KeyBinding, TitlebarOptions,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
 };
 
-use platform::{hide_native_traffic_lights, set_window_always_on_top, setup_window_resizable};
+use platform::set_window_always_on_top;
 use ui::{AppWindow, EmbeddedAssets};
 
 actions!(window, [Quit]);
@@ -29,7 +29,13 @@ fn main() {
             let _window = cx
                 .open_window(
                     WindowOptions {
-                        titlebar: None,
+                        titlebar: Some(TitlebarOptions {
+                            title: None,
+                            appears_transparent: true,
+                            // 红绿灯离窗口左上角的偏移：x 对齐标题栏的左内边距，
+                            // y 让这三颗按钮和右侧的图钉落在同一条中线上
+                            traffic_light_position: Some(point(px(14.0), px(16.0))),
+                        }),
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         kind: WindowKind::Normal,
                         is_movable: true,
@@ -40,7 +46,6 @@ fn main() {
                     },
                     |window, cx| {
                         set_window_always_on_top(window, true);
-                        setup_window_resizable(window, 240.0, 280.0);
 
                         // 启动时立即扫描加载会话
                         let mut scanner = crate::monitor::ProcessScanner::new();
@@ -48,7 +53,6 @@ fn main() {
                         let mut updates = crate::monitor::watcher::spawn(scanner);
                         let app_view = cx.new(|cx| {
                             let subscription = cx.observe_window_bounds(window, |_this, window, _cx| {
-                                hide_native_traffic_lights(window);
                                 let b = window.bounds();
                                 let cfg = WindowConfig {
                                     x: f32::from(b.origin.x),
@@ -82,6 +86,12 @@ fn main() {
                 .expect("Failed to open GPUI window");
 
             cx.activate(true);
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         });
