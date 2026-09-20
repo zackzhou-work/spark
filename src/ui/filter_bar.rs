@@ -6,6 +6,8 @@ use gpui::{
 
 use crate::state::TimeFilter;
 
+const THUMB_RADIUS: f32 = 5.0;
+
 pub fn render_filter_bar(
     current_filter: TimeFilter,
     prev_filter: Option<TimeFilter>,
@@ -30,7 +32,7 @@ pub fn render_filter_bar(
                 .top(px(2.0))
                 .w(px(item_w))
                 .h(px(20.0))
-                .rounded_full()
+                .rounded(px(THUMB_RADIUS))
                 .bg(rgb(0xFFFFFF))
                 .shadow_sm()
                 .with_animation(
@@ -51,7 +53,7 @@ pub fn render_filter_bar(
                 .top(px(2.0))
                 .w(px(item_w))
                 .h(px(20.0))
-                .rounded_full()
+                .rounded(px(THUMB_RADIUS))
                 .bg(rgb(0xFFFFFF))
                 .shadow_sm()
                 .with_animation(
@@ -77,7 +79,7 @@ pub fn render_filter_bar(
                 .left(px(left))
                 .w(px(item_w))
                 .h(px(20.0))
-                .rounded_full()
+                .rounded(px(THUMB_RADIUS))
                 .bg(rgb(0xFFFFFF))
                 .shadow_sm()
                 .into_any_element()
@@ -101,7 +103,7 @@ pub fn render_filter_bar(
                 .items_center()
                 .p(px(2.0))
                 .bg(rgb(0xEDEDED))
-                .rounded_full()
+                .rounded(px(THUMB_RADIUS + 2.0))
                 .child(thumb)
                 .child(render_segment_label(
                     "Today",
@@ -139,7 +141,7 @@ fn render_segment_label(
         .justify_center()
         .w(px(width))
         .h(px(20.0))
-        .rounded_full()
+        .rounded(px(THUMB_RADIUS))
         .cursor_pointer()
         .text_size(px(11.0))
         .on_click(move |event, window, cx| {

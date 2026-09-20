@@ -13,7 +13,8 @@ const HEADER_HEIGHT: f32 = 20.0;
 const ROW_HEIGHT: f32 = 24.0;
 const GROUP_GAP: f32 = 10.0;
 const ROW_GAP: f32 = 2.0;
-const ICON_COLUMN_WIDTH: f32 = 18.0;
+const ICON_COLUMN_WIDTH: f32 = 24.0;
+const ICON_CELL_SIZE: f32 = 12.0;
 
 /// 标题和项目名这一列作为缓存视图，呼吸动效重绘时不重新布局和排版
 pub struct SessionTextColumn {
@@ -49,7 +50,7 @@ impl Render for SessionTextColumn {
                             .h(px(HEADER_HEIGHT))
                             .flex()
                             .items_center()
-                            .pl(px(5.0))
+                            .pl(px(1.0))
                             .pr(px(6.0))
                             .overflow_hidden()
                             .child(
@@ -82,6 +83,15 @@ impl Render for SessionTextColumn {
     }
 }
 
+/// 文件夹图标和状态点共用同一个格子，保证两者中心在同一根竖线上
+fn icon_cell() -> gpui::Div {
+    div()
+        .size(px(ICON_CELL_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
 /// 文件夹图标和状态点这一列每帧重绘，内容很少
 fn render_icon_column(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElement {
     div()
@@ -100,8 +110,12 @@ fn render_icon_column(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElem
                         .h(px(HEADER_HEIGHT))
                         .flex()
                         .items_center()
-                        .pl(px(6.0))
-                        .child(svg().path(FOLDER_PATH).size(px(12.0)).text_color(rgb(0x9CA3AF))),
+                        .pl(px(8.0))
+                        .child(
+                            icon_cell().child(
+                                svg().path(FOLDER_PATH).size(px(ICON_CELL_SIZE)).text_color(rgb(0x9CA3AF)),
+                            ),
+                        ),
                 )
                 .children(group.sessions.iter().map(|session| {
                     let anim_id = SharedString::from(format!("{}_dot_{}", id_prefix, session.id));
@@ -109,8 +123,8 @@ fn render_icon_column(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElem
                         .h(px(ROW_HEIGHT))
                         .flex()
                         .items_center()
-                        .pl(px(6.0))
-                        .child(render_status_dot(session.state, anim_id))
+                        .pl(px(8.0))
+                        .child(icon_cell().child(render_status_dot(session.state, anim_id)))
                 }))
         }))
 }
@@ -150,8 +164,8 @@ pub fn render_session_tree(
 ) -> impl IntoElement {
     div()
         .relative()
-        .mx(px(8.0))
-        .mt(px(2.0))
+        .mx(px(10.0))
+        .mt(px(6.0))
         .mb(px(10.0))
         .child(render_hover_layer(groups, id_prefix))
         .child(
