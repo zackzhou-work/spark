@@ -7,7 +7,7 @@ use crate::state::ProjectGroup;
 use crate::ui::icons::FOLDER_PATH;
 use crate::ui::status_dot::render_status_dot;
 
-pub fn render_session_tree(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElement {
+pub fn render_session_tree(groups: &[ProjectGroup], id_prefix: &str, breath_phase: f32) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -51,7 +51,6 @@ pub fn render_session_tree(groups: &[ProjectGroup], id_prefix: &str) -> impl Int
                     let title = session.title.clone();
                     let state = session.state;
                     let session_id_str = session.id.clone();
-                    let anim_id = SharedString::from(format!("{}_dot_{}", id_prefix, session_id_str));
 
                     div()
                         .id(SharedString::from(format!("{}_row_{}", id_prefix, session_id_str)))
@@ -66,7 +65,7 @@ pub fn render_session_tree(groups: &[ProjectGroup], id_prefix: &str) -> impl Int
                         .on_click(move |_, _, _| {
                             focus_session_window(pid);
                         })
-                        .child(render_status_dot(state, anim_id))
+                        .child(render_status_dot(state, breath_phase))
                         .child(
                             div()
                                 .flex_1()
