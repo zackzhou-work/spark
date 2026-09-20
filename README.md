@@ -64,3 +64,18 @@ cp hooks/spark-hook.sh ~/.config/spark/spark-hook.sh && chmod +x ~/.config/spark
 ```
 
 把 `<you>` 换成你的用户名。
+
+## 打包成 .app
+
+```bash
+./scripts/bundle-mac.sh              # 产物在 target/spark.app
+./scripts/bundle-mac.sh /Applications/spark.app
+```
+
+脚本做四件事：`cargo build --release`、组装 bundle、ad-hoc 签名、`touch` 一下让 Dock 丢掉旧图标缓存。
+
+图标在 `resources/`。`AppIcon.icns` 是现成的那份，`icon/spark.iconset/` 是 16 到 1024 共十个 PNG 原件。装了 Xcode 命令行工具时脚本会用 `iconutil` 从 iconset 现生成，否则直接拷 `.icns`——所以改图标的时候两边都得更新，只改 iconset 会在没装 iconutil 的机器上不生效。
+
+`Info.plist` 里的 `CFBundleIdentifier` 现在是占位的 `dev.spark.monitor`，要分发的话记得换掉。没有设 `LSUIElement`，所以它是个正常的 Dock 应用；想改成纯菜单栏常驻就加一行 `<key>LSUIElement</key><true/>`。
+
+直接 `cargo run` 也能跑，只是没有 bundle 就没有图标，Dock 里是一个通用的可执行文件图标。
