@@ -1,11 +1,11 @@
 use gpui::{
-    div, prelude::*, px, rgb, svg, AnyView, Context, Entity, FontWeight, IntoElement, Render,
-    SharedString, StyleRefinement, Window,
+    div, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, svg, AnyView, Context,
+    Entity, FontWeight, IntoElement, Render, SharedString, StyleRefinement, Window,
 };
 
-use crate::platform::focus_session_window;
+use crate::platform::jump_to_session;
 use crate::state::ProjectGroup;
-use crate::ui::icons::FOLDER_PATH;
+use crate::ui::icons::{FOLDER_PATH, JUMP_PATH};
 use crate::ui::status_dot::render_status_dot;
 
 // 两列各自渲染，靠固定行高对齐
@@ -15,6 +15,11 @@ const GROUP_GAP: f32 = 10.0;
 const ROW_GAP: f32 = 2.0;
 const ICON_COLUMN_WIDTH: f32 = 24.0;
 const ICON_CELL_SIZE: f32 = 12.0;
+const ROW_RADIUS: f32 = 6.0;
+/// hover 底色，行高亮和跳转图标的渐变底共用，避免两处颜色走散
+const HOVER_BG: u32 = 0xF3F4F6;
+/// 跳转图标连同它底下的渐变一起占这么宽，让长标题在图标左侧淡出
+const JUMP_FADE_WIDTH: f32 = 48.0;
 
 /// 标题和项目名这一列作为缓存视图，呼吸动效重绘时不重新布局和排版
 pub struct SessionTextColumn {
@@ -129,6 +134,55 @@ fn render_icon_column(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElem
         }))
 }
 
+/// 跳转图标层：画在两列之上，hover 时淡入，底下压一条渐变把标题尾部盖掉。
+/// 和下面的 hover 层各管各的命中框——gpui 的命中框默认互不遮挡，两层会同时进入 hover
+fn render_jump_layer(groups: &[ProjectGroup]) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .gap(px(GROUP_GAP))
+        .children(groups.iter().map(|group| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(ROW_GAP))
+                .child(div().h(px(HEADER_HEIGHT)))
+                .children(group.sessions.iter().map(|_| {
+                    div()
+                        .h(px(ROW_HEIGHT))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .opacity(0.0)
+                        .hover(|s| s.opacity(1.0))
+                        .child(
+                            div()
+                                .w(px(JUMP_FADE_WIDTH))
+                                .h_full()
+                                .rounded_r(px(ROW_RADIUS))
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .pr(px(6.0))
+                                .bg(linear_gradient(
+                                    90.0,
+                                    linear_color_stop(rgba(HOVER_BG << 8), 0.0),
+                                    linear_color_stop(rgb(HOVER_BG), 0.55),
+                                ))
+                                .child(
+                                    svg()
+                                        .path(JUMP_PATH)
+                                        .size(px(ICON_CELL_SIZE))
+                                        .text_color(rgb(0x9CA3AF)),
+                                ),
+                        )
+                }))
+        }))
+}
+
 /// 铺满整行宽度的透明层，承载 hover 高亮和点击；画在两列下面，普通元素不会挡住它的命中
 fn render_hover_layer(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElement {
     div()
@@ -144,15 +198,15 @@ fn render_hover_layer(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElem
                 .gap(px(ROW_GAP))
                 .child(div().h(px(HEADER_HEIGHT)))
                 .children(group.sessions.iter().map(|session| {
-                    let pid = session.pid;
+                    let session_id = session.id.clone();
                     div()
                         .id(SharedString::from(format!("{}_row_{}", id_prefix, session.id)))
                         .h(px(ROW_HEIGHT))
                         .w_full()
-                        .rounded(px(6.0))
+                        .rounded(px(ROW_RADIUS))
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0xF3F4F6)))
-                        .on_click(move |_, _, _| focus_session_window(pid))
+                        .hover(|s| s.bg(rgb(HOVER_BG)))
+                        .on_click(move |_, _, _| jump_to_session(&session_id))
                 }))
         }))
 }
@@ -176,4 +230,5 @@ pub fn render_session_tree(
                 .child(render_icon_column(groups, id_prefix))
                 .child(AnyView::from(text_column.clone()).cached(StyleRefinement::default().flex_1().min_w_0())),
         )
+        .child(render_jump_layer(groups))
 }

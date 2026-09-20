@@ -5,6 +5,7 @@ pub const PIN_FILLED_PATH: &str = "icons/pin-filled.svg";
 pub const PIN_OUTLINE_PATH: &str = "icons/pin-outline.svg";
 pub const FOLDER_PATH: &str = "icons/folder.svg";
 pub const RESIZE_GRIP_PATH: &str = "icons/resize-grip.svg";
+pub const JUMP_PATH: &str = "icons/jump.svg";
 pub const TRAFFIC_CLOSE_PATH: &str = "icons/traffic-close.svg";
 pub const TRAFFIC_MIN_PATH: &str = "icons/traffic-min.svg";
 pub const TRAFFIC_ZOOM_PATH: &str = "icons/traffic-zoom.svg";
@@ -21,6 +22,11 @@ pub const PIN_OUTLINE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" 
 
 pub const FOLDER_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+</svg>"##;
+
+pub const JUMP_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="7" y1="17" x2="17" y2="7"></line>
+  <polyline points="7 7 17 7 17 17"></polyline>
 </svg>"##;
 
 pub const RESIZE_GRIP_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#D1D5DB" stroke-width="1.2" stroke-linecap="round">
@@ -51,6 +57,7 @@ impl AssetSource for EmbeddedAssets {
             PIN_OUTLINE_PATH => Ok(Some(Cow::Borrowed(PIN_OUTLINE_SVG))),
             FOLDER_PATH => Ok(Some(Cow::Borrowed(FOLDER_SVG))),
             RESIZE_GRIP_PATH => Ok(Some(Cow::Borrowed(RESIZE_GRIP_SVG))),
+            JUMP_PATH => Ok(Some(Cow::Borrowed(JUMP_SVG))),
             TRAFFIC_CLOSE_PATH => Ok(Some(Cow::Borrowed(TRAFFIC_CLOSE_SVG))),
             TRAFFIC_MIN_PATH => Ok(Some(Cow::Borrowed(TRAFFIC_MIN_SVG))),
             TRAFFIC_ZOOM_PATH => Ok(Some(Cow::Borrowed(TRAFFIC_ZOOM_SVG))),
@@ -64,6 +71,7 @@ impl AssetSource for EmbeddedAssets {
             PIN_OUTLINE_PATH.into(),
             FOLDER_PATH.into(),
             RESIZE_GRIP_PATH.into(),
+            JUMP_PATH.into(),
             TRAFFIC_CLOSE_PATH.into(),
             TRAFFIC_MIN_PATH.into(),
             TRAFFIC_ZOOM_PATH.into(),
