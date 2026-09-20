@@ -18,12 +18,11 @@ const ICON_COLUMN_WIDTH: f32 = 18.0;
 /// 标题和项目名这一列作为缓存视图，呼吸动效重绘时不重新布局和排版
 pub struct SessionTextColumn {
     groups: Vec<ProjectGroup>,
-    id_prefix: &'static str,
 }
 
 impl SessionTextColumn {
-    pub fn new(groups: Vec<ProjectGroup>, id_prefix: &'static str) -> Self {
-        Self { groups, id_prefix }
+    pub fn new(groups: Vec<ProjectGroup>) -> Self {
+        Self { groups }
     }
 
     pub fn set_groups(&mut self, groups: Vec<ProjectGroup>, cx: &mut Context<Self>) {
@@ -36,7 +35,6 @@ impl SessionTextColumn {
 
 impl Render for SessionTextColumn {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let id_prefix = self.id_prefix;
         div()
             .flex()
             .flex_col()
@@ -64,18 +62,12 @@ impl Render for SessionTextColumn {
                             ),
                     )
                     .children(group.sessions.iter().map(|session| {
-                        let pid = session.pid;
                         div()
-                            .id(SharedString::from(format!("{}_row_{}", id_prefix, session.id)))
                             .h(px(ROW_HEIGHT))
                             .flex()
                             .items_center()
                             .pl(px(1.0))
                             .pr(px(6.0))
-                            .rounded(px(6.0))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xF3F4F6)))
-                            .on_click(move |_, _, _| focus_session_window(pid))
                             .overflow_hidden()
                             .child(
                                 div()
@@ -123,18 +115,51 @@ fn render_icon_column(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElem
         }))
 }
 
+/// 铺满整行宽度的透明层，承载 hover 高亮和点击；画在两列下面，普通元素不会挡住它的命中
+fn render_hover_layer(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .gap(px(GROUP_GAP))
+        .children(groups.iter().map(|group| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(ROW_GAP))
+                .child(div().h(px(HEADER_HEIGHT)))
+                .children(group.sessions.iter().map(|session| {
+                    let pid = session.pid;
+                    div()
+                        .id(SharedString::from(format!("{}_row_{}", id_prefix, session.id)))
+                        .h(px(ROW_HEIGHT))
+                        .w_full()
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(0xF3F4F6)))
+                        .on_click(move |_, _, _| focus_session_window(pid))
+                }))
+        }))
+}
+
 pub fn render_session_tree(
     groups: &[ProjectGroup],
     id_prefix: &str,
     text_column: &Entity<SessionTextColumn>,
 ) -> impl IntoElement {
     div()
-        .flex()
-        .flex_row()
-        .items_start()
-        .px(px(8.0))
-        .pt(px(2.0))
-        .pb(px(10.0))
-        .child(render_icon_column(groups, id_prefix))
-        .child(AnyView::from(text_column.clone()).cached(StyleRefinement::default().flex_1().min_w_0()))
+        .relative()
+        .mx(px(8.0))
+        .mt(px(2.0))
+        .mb(px(10.0))
+        .child(render_hover_layer(groups, id_prefix))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .child(render_icon_column(groups, id_prefix))
+                .child(AnyView::from(text_column.clone()).cached(StyleRefinement::default().flex_1().min_w_0())),
+        )
 }

@@ -24,8 +24,8 @@ impl AppWindow {
             prev_filter: None,
             project_groups,
         };
-        let today_list = cx.new(|_| SessionTextColumn::new(state.today_groups(), "today"));
-        let all_list = cx.new(|_| SessionTextColumn::new(state.all_groups(), "all"));
+        let today_list = cx.new(|_| SessionTextColumn::new(state.today_groups()));
+        let all_list = cx.new(|_| SessionTextColumn::new(state.all_groups()));
         Self {
             state,
             today_list,
