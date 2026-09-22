@@ -1,14 +1,16 @@
+use std::time::{Duration, Instant};
+
 use gpui::{
     div, linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba, svg, AnyView, Context,
-    Entity, FontWeight, IntoElement, Render, SharedString, StyleRefinement, Window,
+    Entity, FontWeight, IntoElement, Render, SharedString, StyleRefinement, Task, Window,
 };
 
 use crate::platform::jump_to_session;
-use crate::state::ProjectGroup;
+use crate::state::{ProjectGroup, TaskState};
 use crate::ui::icons::{FOLDER_PATH, JUMP_PATH};
-use crate::ui::status_dot::render_status_dot;
+use crate::ui::status_dot::{render_status_dot, BREATH_PERIOD_MS};
 
-// 两列各自渲染，靠固定行高对齐
+// 各层各自渲染，靠固定行高对齐
 const HEADER_HEIGHT: f32 = 20.0;
 const ROW_HEIGHT: f32 = 24.0;
 const GROUP_GAP: f32 = 10.0;
@@ -21,7 +23,19 @@ const HOVER_BG: u32 = 0xF3F4F6;
 /// 跳转图标连同它底下的渐变一起占这么宽，让长标题在图标左侧淡出
 const JUMP_FADE_WIDTH: f32 = 48.0;
 
-/// 标题和项目名这一列作为缓存视图，呼吸动效重绘时不重新布局和排版
+/// 缓存视图没有内在高度，撑开滚动区的高度只能按上面这套行节奏自己算
+pub fn content_height(groups: &[ProjectGroup]) -> f32 {
+    if groups.is_empty() {
+        return 0.0;
+    }
+    let rows: f32 = groups
+        .iter()
+        .map(|g| HEADER_HEIGHT + g.sessions.len() as f32 * (ROW_HEIGHT + ROW_GAP))
+        .sum();
+    rows + (groups.len() - 1) as f32 * GROUP_GAP
+}
+
+/// 标题和项目名这一列作为缓存视图，hover 重绘时不重新布局和排版
 pub struct SessionTextColumn {
     groups: Vec<ProjectGroup>,
 }
@@ -93,6 +107,152 @@ impl Render for SessionTextColumn {
     }
 }
 
+/// 一页会话列表里不随动效变化的部分：hover 层、文件夹图标列和标题列。
+/// 整页挂成缓存视图，状态点每帧重绘时它的布局和排版都能原样复用
+pub struct SessionPage {
+    groups: Vec<ProjectGroup>,
+    id_prefix: &'static str,
+    text_column: Entity<SessionTextColumn>,
+}
+
+impl SessionPage {
+    pub fn new(
+        groups: Vec<ProjectGroup>,
+        id_prefix: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let text_column = cx.new(|_| SessionTextColumn::new(groups.clone()));
+        Self {
+            groups,
+            id_prefix,
+            text_column,
+        }
+    }
+
+    pub fn set_groups(&mut self, groups: Vec<ProjectGroup>, cx: &mut Context<Self>) {
+        if self.groups == groups {
+            return;
+        }
+        self.groups = groups.clone();
+        self.text_column
+            .update(cx, |column, cx| column.set_groups(groups, cx));
+        cx.notify();
+    }
+}
+
+impl Render for SessionPage {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .relative()
+            .w_full()
+            .child(render_hover_layer(&self.groups, self.id_prefix))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .child(render_folder_column(&self.groups))
+                    .child(
+                        AnyView::from(self.text_column.clone())
+                            .cached(StyleRefinement::default().flex_1().min_w_0()),
+                    ),
+            )
+            .child(render_jump_layer(&self.groups))
+    }
+}
+
+/// 呼吸动效的重绘节奏。gpui 的 with_animation 按屏幕刷新率逐帧请求重绘，
+/// 而一次重绘要走完整的 present，一颗 6px 的慢速渐变不值这个开销，
+/// 这里自己按固定间隔推进相位
+const BREATH_TICK: Duration = Duration::from_millis(80);
+
+/// 状态点单独一层：只有它跟着呼吸重绘，其余各层都在缓存视图里原样复用
+pub struct StatusDotLayer {
+    groups: Vec<ProjectGroup>,
+    started: Instant,
+    visible: bool,
+    breathing: Option<Task<()>>,
+}
+
+impl StatusDotLayer {
+    pub fn new(groups: Vec<ProjectGroup>, visible: bool, cx: &mut Context<Self>) -> Self {
+        let mut layer = Self {
+            groups,
+            started: Instant::now(),
+            visible,
+            breathing: None,
+        };
+        layer.sync_breathing(cx);
+        layer
+    }
+
+    pub fn set_groups(&mut self, groups: Vec<ProjectGroup>, cx: &mut Context<Self>) {
+        if self.groups == groups {
+            return;
+        }
+        self.groups = groups;
+        self.sync_breathing(cx);
+        cx.notify();
+    }
+
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.sync_breathing(cx);
+        }
+    }
+
+    /// 这一页没显示、或者没有运行中的会话，就把定时器停掉，窗口一帧都不用重绘
+    fn sync_breathing(&mut self, cx: &mut Context<Self>) {
+        let running = self.visible
+            && self
+                .groups
+                .iter()
+                .flat_map(|g| &g.sessions)
+                .any(|s| s.state == TaskState::Running);
+
+        if !running {
+            self.breathing = None;
+        } else if self.breathing.is_none() {
+            self.breathing = Some(cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(BREATH_TICK).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }));
+        }
+    }
+}
+
+impl Render for StatusDotLayer {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // 先取模再转 f32：跑上几小时之后毫秒数会超出 f32 的精度，相位会卡住
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        let phase = (elapsed_ms % BREATH_PERIOD_MS) as f32 / BREATH_PERIOD_MS as f32;
+        div()
+            .w(px(ICON_COLUMN_WIDTH))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(GROUP_GAP))
+            .children(self.groups.iter().map(|group| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ROW_GAP))
+                    .child(div().h(px(HEADER_HEIGHT)))
+                    .children(group.sessions.iter().map(|session| {
+                        div()
+                            .h(px(ROW_HEIGHT))
+                            .flex()
+                            .items_center()
+                            .pl(px(8.0))
+                            .child(icon_cell().child(render_status_dot(session.state, phase)))
+                    }))
+            }))
+    }
+}
+
 /// 文件夹图标和状态点共用同一个格子，保证两者中心在同一根竖线上
 fn icon_cell() -> gpui::Div {
     div()
@@ -102,8 +262,8 @@ fn icon_cell() -> gpui::Div {
         .justify_center()
 }
 
-/// 文件夹图标和状态点这一列每帧重绘，内容很少
-fn render_icon_column(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElement {
+/// 文件夹图标这一列；会话行留空占位，状态点由上面那一层盖上来
+fn render_folder_column(groups: &[ProjectGroup]) -> impl IntoElement {
     div()
         .w(px(ICON_COLUMN_WIDTH))
         .flex_none()
@@ -127,15 +287,7 @@ fn render_icon_column(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElem
                             ),
                         ),
                 )
-                .children(group.sessions.iter().map(|session| {
-                    let anim_id = SharedString::from(format!("{}_dot_{}", id_prefix, session.id));
-                    div()
-                        .h(px(ROW_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .pl(px(8.0))
-                        .child(icon_cell().child(render_status_dot(session.state, anim_id)))
-                }))
+                .children(group.sessions.iter().map(|_| div().h(px(ROW_HEIGHT))))
         }))
 }
 
@@ -216,24 +368,39 @@ fn render_hover_layer(groups: &[ProjectGroup], id_prefix: &str) -> impl IntoElem
         }))
 }
 
-pub fn render_session_tree(
-    groups: &[ProjectGroup],
-    id_prefix: &str,
-    text_column: &Entity<SessionTextColumn>,
-) -> impl IntoElement {
-    div()
-        .relative()
-        .mx(px(10.0))
-        .mt(px(6.0))
-        .mb(px(10.0))
-        .child(render_hover_layer(groups, id_prefix))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_start()
-                .child(render_icon_column(groups, id_prefix))
-                .child(AnyView::from(text_column.clone()).cached(StyleRefinement::default().flex_1().min_w_0())),
-        )
-        .child(render_jump_layer(groups))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{SessionItem, TaskState};
+
+    fn group(name: &str, sessions: usize) -> ProjectGroup {
+        ProjectGroup {
+            project_name: name.to_string(),
+            sessions: (0..sessions)
+                .map(|i| SessionItem {
+                    id: format!("{name}-{i}"),
+                    title: format!("session {i}"),
+                    state: TaskState::Completed,
+                    pid: None,
+                    working_dir: String::new(),
+                    is_today: true,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn content_height_follows_the_row_rhythm() {
+        assert_eq!(content_height(&[]), 0.0);
+        // 一组两行：表头 + 两行 + 组内三个子项之间的两个间距
+        assert_eq!(
+            content_height(&[group("a", 2)]),
+            HEADER_HEIGHT + 2.0 * ROW_HEIGHT + 2.0 * ROW_GAP
+        );
+        // 两组之间再加一个组间距
+        assert_eq!(
+            content_height(&[group("a", 1), group("b", 1)]),
+            2.0 * (HEADER_HEIGHT + ROW_HEIGHT + ROW_GAP) + GROUP_GAP
+        );
+    }
 }
